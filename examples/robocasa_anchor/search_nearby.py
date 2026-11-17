@@ -1,4 +1,6 @@
 """Search nearby successful Anchor candidates for unpaired Human episodes."""
+
+from openpi.shared.paths import workspace_path
 import argparse,concurrent.futures,csv,json,math,os,signal,subprocess,sys,threading,time
 from pathlib import Path
 import cv2
@@ -15,8 +17,8 @@ def read_result(path):
 
 def main():
     p=argparse.ArgumentParser()
-    p.add_argument('--source',type=Path,default=Path('/data4/xuchenfei/robocasa365/data/household_augmented'))
-    p.add_argument('--dataset',type=Path,default=Path('/data5/xuchenfei/robocasa365_household_anchor_official_collision'))
+    p.add_argument('--source',type=Path,default=workspace_path('data/train'))
+    p.add_argument('--dataset',type=Path,default=workspace_path('data/train'))
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--gpu',type=int,default=5)
     p.add_argument('--workers',type=int,default=2)
@@ -82,7 +84,7 @@ def main():
         else:cmd+=['--anchor-local-offset',*[str(v) for v in offset],'--execute-transition','--execute-operation']
         env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(a.gpu),MUJOCO_EGL_DEVICE_ID=str(a.gpu),MUJOCO_GL='egl',PYOPENGL_PLATFORM='egl',
                  __EGL_VENDOR_LIBRARY_FILENAMES='/usr/share/glvnd/egl_vendor.d/10_nvidia.json',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',NUMEXPR_NUM_THREADS='1',
-                 PYTHONPATH='/data4/xuchenfei/robocasa365/third_party/robocasa:/data4/xuchenfei/robocasa365/third_party/robosuite')
+                 PYTHONPATH=os.environ.get('PYTHONPATH', ''))
         with (dest/'run.log').open('a') as f:
             proc=subprocess.Popen(cmd,env=env,stdout=f,stderr=subprocess.STDOUT,start_new_session=True)
             try:code=proc.wait(timeout=900)

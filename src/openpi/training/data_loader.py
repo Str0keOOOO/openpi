@@ -7,7 +7,7 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
-#import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+#import lerobot.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 
@@ -139,11 +139,11 @@ def create_torch_dataset(
 
     if getattr(data_config, 'spatial_teacher_cache_dir', None):
         if data_config.dense_teacher_cache:
-            from examples.robocasa_spatial.dense_teacher_dataset import OfficialMixtureWithDenseTeacher as TeacherDataset
+            from openpi.training.teacher.dense_dataset import OfficialMixtureWithDenseTeacher as TeacherDataset
         elif data_config.dual_teacher_cache:
-            from examples.robocasa_spatial.dual_teacher_dataset import OfficialMixtureWithDualTeacher as TeacherDataset
+            from openpi.training.teacher.dual_dataset import OfficialMixtureWithDualTeacher as TeacherDataset
         else:
-            from examples.robocasa_spatial.official_mixture import OfficialMixtureWithTeacher as TeacherDataset
+            from openpi.training.teacher.mixture import OfficialMixtureWithTeacher as TeacherDataset
 
         return TeacherDataset(
             dataset_meta_list=data_config.data_dirs,
@@ -171,7 +171,7 @@ def create_torch_dataset(
             raise ValueError
 
     # Standard (openpi) LeRobot dataset loading
-    import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+    import lerobot.datasets.lerobot_dataset as lerobot_dataset
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,

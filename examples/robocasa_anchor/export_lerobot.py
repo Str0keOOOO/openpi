@@ -1,4 +1,6 @@
 """Copy Human data and append verified executed Anchor episodes using LeRobot."""
+
+from openpi.shared.paths import workspace_path
 import argparse,csv,fcntl,json,os,shutil,tempfile
 from pathlib import Path
 import cv2,numpy as np,pandas as pd
@@ -140,6 +142,6 @@ def append(source,output,task,source_episode,pilot):
 
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=Path('/data4/xuchenfei/robocasa365/data/household_augmented'));p.add_argument('--output',type=Path,required=True);p.add_argument('--task',choices=TASKS,required=True);p.add_argument('--episode',type=int,required=True);p.add_argument('--pilot',type=Path,required=True);a=p.parse_args()
+ p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=workspace_path('data/train'));p.add_argument('--output',type=Path,required=True);p.add_argument('--task',choices=TASKS,required=True);p.add_argument('--episode',type=int,required=True);p.add_argument('--pilot',type=Path,required=True);a=p.parse_args()
  initialize(a.source,a.output);append(a.source,a.output,a.task,a.episode,a.pilot)
 if __name__=='__main__':main()

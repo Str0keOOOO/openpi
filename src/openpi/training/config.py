@@ -26,6 +26,7 @@ import openpi.policies.robocasa_policy as robocasa_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.shared.nnx_utils as _nnx_utils
+from openpi.shared.paths import workspace_path
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
@@ -43,10 +44,7 @@ Filter: TypeAlias = nnx.filterlib.Filter
 
 def _project_path(relative: str) -> str:
     """Resolve local assets from the reorganized workspace root."""
-    root = pathlib.Path(os.environ.get(
-        "ROBOCASA365_ROOT", str(pathlib.Path(__file__).resolve().parents[5])
-    ))
-    return str(root / relative)
+    return str(workspace_path(relative))
 
 
 
@@ -621,8 +619,8 @@ class LeRobotRobocasaSpatialDataConfig(LeRobotRobocasaDataConfig):
     spatial_teacher_cache_dir: str = ''
     dual_teacher_cache: bool = False
     dense_teacher_cache: bool = False
-    spatial_windows_csv: str = _project_path('data/training_views/fixed_base_chunk_starts.csv')
-    spatial_episode_audit_csv: str = _project_path('data/training_views/episodes.csv')
+    spatial_windows_csv: str = _project_path('data/views/fixed_base_chunk_starts.csv')
+    spatial_episode_audit_csv: str = _project_path('data/views/episodes.csv')
     spatial_episode_exclusions_csv: str = ''
     spatial_split: Literal['train', 'all'] = 'train'
     minimum_teacher_episode_coverage: float = 0.95
@@ -638,9 +636,9 @@ class LeRobotRobocasaSpatialDataConfig(LeRobotRobocasaDataConfig):
             'observation/state':'observation/state','actions':'actions','prompt':'prompt',
             'teacher_latent':'teacher_latent','teacher_valid':'teacher_valid',
         })])
-        from examples.robocasa_spatial.episode_dataset import SpatialInputs
+        from openpi.training.teacher.spatial_inputs import SpatialInputs
         if self.dense_teacher_cache:
-            from examples.robocasa_spatial.dense_teacher_dataset import DenseSpatialInputs
+            from openpi.training.teacher.dense_dataset import DenseSpatialInputs
             SpatialInputs=DenseSpatialInputs
             mapping={k:k for k in ['observation/image','observation/wrist_image','observation/right_image','observation/state','actions','prompt','scene_flow','scene_pixel_valid','ee_teacher','ee_teacher_valid']}
             repack=_transforms.Group(inputs=[_transforms.RepackTransform(mapping)])
@@ -1383,7 +1381,7 @@ _CONFIGS = [
         data=LeRobotRobocasaSpatialDataConfig(
             data_dirs=[
                 {**entry,
-                 "path": str(pathlib.Path(_project_path('data/training_views/groot')) / entry["task"]),
+                 "path": str(pathlib.Path(_project_path('data/views/human')) / entry["task"]),
                  "filter_key": None}
                 for entry in DATASET_SOUP_REGISTRY["pretrain_human300"]
                 if entry["task"] in (
@@ -1432,7 +1430,7 @@ _CONFIGS = [
         data=LeRobotRobocasaDataConfig(
             data_dirs=[
                 {**entry,
-                 "path": str(pathlib.Path(_project_path('data/training_views/groot')) / entry["task"]),
+                 "path": str(pathlib.Path(_project_path('data/views/human')) / entry["task"]),
                  "filter_key": None}
                 for entry in DATASET_SOUP_REGISTRY["pretrain_human300"]
                 if entry["task"] in (
@@ -1484,7 +1482,7 @@ _human418_baseline = next(c for c in _CONFIGS if c.name == "pi05_robocasa_human4
 _CONFIGS.append(dataclasses.replace(
     _human418_baseline, name="pi05_robocasa_human418_baseline",
     data=dataclasses.replace(_human418_baseline.data, data_dirs=[
-        {**entry, "path": str(pathlib.Path(_project_path('data/training_views/human418_groot')) / entry["task"])}
+        {**entry, "path": str(pathlib.Path(_project_path('data/views/human')) / entry["task"])}
         for entry in _human418_baseline.data.data_dirs
     ]),
 ))
@@ -1494,7 +1492,7 @@ _spatial_base = next(c for c in _CONFIGS if c.name == "pi05_robocasa_spatial_que
 _dual_model = dataclasses.replace(_spatial_base.model, enable_dual_teacher=True, image_augmentation_enabled=False)
 _dual_data = dataclasses.replace(_spatial_base.data, dual_teacher_cache=True,
     spatial_teacher_cache_dir=_project_path('output/roma_ee_dual_teacher/cache'),
-    data_dirs=[{**entry, "path": str(pathlib.Path(_project_path('data/household_augmented')) / entry["task"] / "lerobot"), "filter_key": None} for entry in _spatial_base.data.data_dirs])
+    data_dirs=[{**entry, "path": str(pathlib.Path(_project_path('data/train')) / entry["task"] / "lerobot"), "filter_key": None} for entry in _spatial_base.data.data_dirs])
 _dual_freeze = nnx.Not(_nnx_utils.PathRegex(".*(lora|spatial_query|scene_hidden|scene_head|ee_hidden|ee_head).*"))
 _dual_baseline_model = dataclasses.replace(_spatial_base.model, enable_spatial_query=False, enable_dual_teacher=False, image_augmentation_enabled=False)
 _dual_baseline_data = dataclasses.replace(_human418_baseline.data, data_dirs=_dual_data.data_dirs)
@@ -1512,16 +1510,16 @@ for _suffix, _scene_weight, _ee_weight in (("scene", .05, 0.), ("ee", 0., .01), 
         lambda_spatial=0., lambda_scene=_scene_weight, lambda_ee=_ee_weight))
 
 # Final paired-data experiments: same native Human baseline preprocessing and freeze policy.
-for _name, _view, _steps in (("pi05_household_augmented_lora_30k", "final_augmented_groot", 30000),
-                             ("pi05_household_anchor_lora_6k", "final_anchor_groot", 6000)):
+for _name, _view, _steps in (("pi05_household_augmented_lora_30k", "all", 30000),
+                             ("pi05_household_anchor_lora_6k", "anchor", 6000)):
     _data = dataclasses.replace(_human418_baseline.data, data_dirs=[
-        {**e, "path": str(pathlib.Path(_project_path('data/training_views')) / _view / e["task"]), "filter_key": None}
+        {**e, "path": str(pathlib.Path(_project_path('data/views')) / _view / e["task"]), "filter_key": None}
         for e in _human418_baseline.data.data_dirs])
     _CONFIGS.append(dataclasses.replace(_human418_baseline, name=_name, data=_data,
         num_train_steps=_steps, batch_size=32, num_workers=2,
         lr_schedule=dataclasses.replace(_human418_baseline.lr_schedule, decay_steps=_steps),
         save_interval=2000, keep_period=None, ema_decay=None,
-        gradient_accumulation_steps=8 if _view=="final_anchor_groot" else 1))
+        gradient_accumulation_steps=8 if _view=="anchor" else 1))
 
 _final_aug_base=next(c for c in _CONFIGS if c.name=="pi05_household_augmented_lora_30k")
 _final_dense_data=dataclasses.replace(_dual_data,dense_teacher_cache=True,

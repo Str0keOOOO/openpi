@@ -13,19 +13,27 @@ In the video, the original recording is on top and the simulation replay is
 below. `success_ever` and `success_final` refer to continuous action execution;
 `recorded_last_state_success` is a separate saved-state diagnostic.
 
+From the repository root, activate the simulation environment:
+
+```bash
+source scripts/env.sh
+source ../envs/sim/bin/activate
+cd examples/robocasa_replay
+```
+
 Example full replay:
 
 ```bash
-python replay_human.py --dataset /data5/xuchenfei/robocasa365_household \
-  --output /data5/xuchenfei/robocasa365/outputs/replay_run \
+python replay_human.py --dataset "$ROBOCASA365_ROOT/data/train" \
+  --output "$ROBOCASA365_ROOT/output/replay_run" \
   --task PickPlaceCounterToCabinet --episode 33 --gpu 1
 ```
 
 Example segment replay, using source actions 80 through 139:
 
 ```bash
-python replay_human.py --dataset /data5/xuchenfei/robocasa365_household \
-  --output /data5/xuchenfei/robocasa365/outputs/replay_segment \
+python replay_human.py --dataset "$ROBOCASA365_ROOT/data/train" \
+  --output "$ROBOCASA365_ROOT/output/replay_segment" \
   --task PickPlaceCounterToCabinet --episode 33 --gpu 1 \
   --start-index 80 --stop-index 140
 ```

@@ -1,4 +1,6 @@
 """Resumable four-GPU Anchor rollouts and serialized LeRobot export."""
+
+from openpi.shared.paths import workspace_path
 import argparse,concurrent.futures,csv,json,os,queue,signal,subprocess,sys,threading,time,traceback
 from pathlib import Path
 
@@ -8,8 +10,8 @@ def dump(path,obj):
 
 
 def main():
- p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=Path('/data4/xuchenfei/robocasa365/data/household_augmented'));p.add_argument('--dataset',type=Path,required=True);p.add_argument('--run-root',type=Path,required=True);p.add_argument('--gpus',type=int,nargs='+',default=[0,1,3,4]);p.add_argument('--timeout',type=int,default=900);p.add_argument('--retry-errors',action='store_true');p.add_argument('--episode-list',type=Path,help='CSV with task,episode columns; run only these source episodes');p.add_argument('--adaptive-interpolation',action='store_true',help='Use local EE interpolation for saturated targets');p.add_argument('--min-interpolation-substeps',type=int,default=2);p.add_argument('--max-interpolation-substeps',type=int,default=4);p.add_argument('--retry-operation-failures',action='store_true',help='Reexecute only existing operation failures; successful source episodes remain deduplicated');a=p.parse_args()
- if a.source.resolve()!=Path('/data4/xuchenfei/robocasa365/data/household_augmented').resolve(): raise ValueError('The current simulator worker is configured for the cleaned Human source only')
+ p=argparse.ArgumentParser();p.add_argument('--source',type=Path,default=workspace_path('data/train'));p.add_argument('--dataset',type=Path,required=True);p.add_argument('--run-root',type=Path,required=True);p.add_argument('--gpus',type=int,nargs='+',default=[0,1,3,4]);p.add_argument('--timeout',type=int,default=900);p.add_argument('--retry-errors',action='store_true');p.add_argument('--episode-list',type=Path,help='CSV with task,episode columns; run only these source episodes');p.add_argument('--adaptive-interpolation',action='store_true',help='Use local EE interpolation for saturated targets');p.add_argument('--min-interpolation-substeps',type=int,default=2);p.add_argument('--max-interpolation-substeps',type=int,default=4);p.add_argument('--retry-operation-failures',action='store_true',help='Reexecute only existing operation failures; successful source episodes remain deduplicated');a=p.parse_args()
+ if a.source.resolve()!=workspace_path('data/train').resolve(): raise ValueError('The current simulator worker is configured for the cleaned Human source only')
  from export_lerobot import initialize,rebuild_episode_map,append
  a.run_root.mkdir(parents=True,exist_ok=True);(a.run_root/'logs').mkdir(exist_ok=True)
  initialize(a.source,a.dataset);rebuild_episode_map(a.source,a.dataset)
@@ -59,7 +61,7 @@ def main():
     with mutex:results[job]={'status':'running','stage':'initialization'};persist()
     cmd=[sys.executable,'-u',str(Path(__file__).with_name('preflight.py')),'--task',task,'--episode',str(ep),'--gpu',str(gpu),'--output',str(dest),'--execute-transition','--execute-operation','--min-interpolation-substeps',str(a.min_interpolation_substeps),'--max-interpolation-substeps',str(a.max_interpolation_substeps)]
     if a.adaptive_interpolation:cmd.append('--adaptive-interpolation')
-    env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(gpu),MUJOCO_EGL_DEVICE_ID=str(gpu),MUJOCO_GL='egl',PYOPENGL_PLATFORM='egl',__EGL_VENDOR_LIBRARY_FILENAMES='/usr/share/glvnd/egl_vendor.d/10_nvidia.json',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',NUMEXPR_NUM_THREADS='1',PYTHONPATH='/data4/xuchenfei/robocasa365/third_party/robocasa:/data4/xuchenfei/robocasa365/third_party/robosuite')
+    env=dict(os.environ,CUDA_VISIBLE_DEVICES=str(gpu),MUJOCO_EGL_DEVICE_ID=str(gpu),MUJOCO_GL='egl',PYOPENGL_PLATFORM='egl',__EGL_VENDOR_LIBRARY_FILENAMES='/usr/share/glvnd/egl_vendor.d/10_nvidia.json',OMP_NUM_THREADS='1',OPENBLAS_NUM_THREADS='1',MKL_NUM_THREADS='1',NUMEXPR_NUM_THREADS='1',PYTHONPATH=os.environ.get('PYTHONPATH', ''))
     with (a.run_root/'logs'/f'{task}_{ep:06d}.log').open('a') as f:
      proc=subprocess.Popen(cmd,stdout=f,stderr=subprocess.STDOUT,env=env,start_new_session=True)
      try:code=proc.wait(timeout=a.timeout)

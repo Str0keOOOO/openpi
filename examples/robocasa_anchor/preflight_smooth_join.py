@@ -1,4 +1,6 @@
 """Real-scene IK preflight for one Human episode at its CSV Anchor."""
+
+from openpi.shared.paths import workspace_path
 import argparse,csv,importlib.util,json,math,traceback,re,sys
 from pathlib import Path
 import numpy as np
@@ -36,7 +38,7 @@ def main(argv=None):
   from robocasa.utils import lerobot_utils as LU
   from robocasa.scripts.dataset_scripts.playback_dataset import reset_to
   from robosuite.utils.ik_utils import IKSolver
-  root=Path('/data4/xuchenfei/robocasa365/data/household_augmented');data=root/a.task/'lerobot'
+  root=workspace_path('data/train');data=root/a.task/'lerobot'
   row=None if a.reference_anchor_extras else next(r for r in csv.DictReader((root/'anchor_records.csv').open()) if r['task']==a.task and int(r['filtered_episode_index'])==a.episode)
   meta=LU.get_episode_meta(data,a.episode);states=LU.get_episode_states(data,a.episode);xml=LU.get_episode_model_xml(data,a.episode);em=LU.get_env_metadata(data)
   kw=dict(em['env_kwargs']);kw.update(env_name=em['env_name'],has_renderer=False,has_offscreen_renderer=True,use_camera_obs=False,camera_names=['robot0_agentview_left'],camera_widths=256,camera_heights=256,render_gpu_device_id=a.gpu,seed=0,ignore_done=True,randomize_cameras=False)
