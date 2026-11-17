@@ -1,0 +1,135 @@
+{
+  "schema_version": 3,
+  "tasks": [
+    "PickPlaceSinkToCounter",
+    "OpenDrawer",
+    "OpenStandMixerHead",
+    "PickPlaceCounterToCabinet"
+  ],
+  "scene": {
+    "layout_id": 11,
+    "style_id": 11,
+    "seed": 7,
+    "selection_basis": "provisional_pretrain_pair_not_verified_by_demonstration_frequency",
+    "object_split": "pretrain"
+  },
+  "checkpoint": "/data4/xuchenfei/robocasa365/model/pi05_pretrain_human300/multitask_learning/75000",
+  "policy_config": "pi05_pretrain_human300",
+  "inference": {
+    "resize_size": 224,
+    "replan_steps": 5
+  },
+  "sampling": {
+    "mode": "stratified_random",
+    "seed": 20261106,
+    "samples_per_stratum": 5,
+    "body_magnitude_bins": {
+      "dx_m": [
+        [
+          0,
+          0.05
+        ],
+        [
+          0.05,
+          0.1
+        ],
+        [
+          0.1,
+          0.2
+        ]
+      ],
+      "dy_m": [
+        [
+          0,
+          0.05
+        ],
+        [
+          0.05,
+          0.1
+        ],
+        [
+          0.1,
+          0.2
+        ]
+      ],
+      "dyaw_deg": [
+        [
+          0,
+          5
+        ],
+        [
+          5,
+          10
+        ],
+        [
+          10,
+          20
+        ]
+      ],
+      "dh_m": [
+        [
+          0,
+          0.02
+        ],
+        [
+          0.02,
+          0.04
+        ],
+        [
+          0.04,
+          0.06
+        ]
+      ]
+    },
+    "arm_magnitude_bins_deg": [
+      [
+        0,
+        2
+      ],
+      [
+        2,
+        5
+      ],
+      [
+        5,
+        10
+      ]
+    ],
+    "max_attempts_per_stratum": 50
+  },
+  "body_perturbations": {
+    "dx_m": [
+      -0.1,
+      0.1
+    ],
+    "dy_m": [
+      -0.1,
+      0.1
+    ],
+    "dyaw_deg": [
+      -10,
+      10
+    ],
+    "dh_m": [
+      -0.05,
+      0.05
+    ]
+  },
+  "arm_perturbations": {
+    "joint_indices": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "delta_deg": [
+      -5,
+      5
+    ]
+  },
+  "repeats": 1,
+  "baseline_repeats": 5
+}

@@ -1,0 +1,9 @@
+[
+  {
+    "task": "PickPlaceSinkToCounter",
+    "dataset": "/path/to/held_out_paired_dataset",
+    "anchor_episode": 0,
+    "source_human_episode": 0,
+    "scene_seed": 20261111
+  }
+]

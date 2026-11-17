@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import os
 import pathlib
@@ -52,13 +53,25 @@ def create_trained_policy(
     weight_path = os.path.join(checkpoint_dir, "model.safetensors")
     is_pytorch = os.path.exists(weight_path)
 
+    # Inference-only checkpoints carry their own statistics. Supply them before
+    # creating the data config, whose training fallback reads dataset files.
+    if norm_stats is None and (checkpoint_dir / "assets" / "norm_stats.json").is_file():
+        norm_stats = _normalize.load(checkpoint_dir / "assets")
+        logging.info("Using checkpoint normalization statistics from %s", checkpoint_dir / "assets")
+    data_factory = train_config.data
+    if norm_stats is not None:
+        base_config = dataclasses.replace(
+            data_factory.base_config or _config.DataConfig(), norm_stats=norm_stats
+        )
+        data_factory = dataclasses.replace(data_factory, base_config=base_config)
+    data_config = data_factory.create(train_config.assets_dirs, train_config.model)
+
     logging.info("Loading model...")
     if is_pytorch:
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
         model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
-    data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
         # that the policy is using the same normalization stats as the original training process.

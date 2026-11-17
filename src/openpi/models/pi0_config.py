@@ -31,6 +31,12 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # Optional RoboCasa episode-level spatial-query distillation extension.
+    enable_spatial_query: bool = False
+    spatial_num_queries: int = 8
+    enable_dual_teacher: bool = False
+    image_augmentation_enabled: bool = True
+    teacher_latent_dim: int = 64
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -47,6 +53,20 @@ class Pi0Config(_model.BaseModelConfig):
 
     @override
     def create(self, rng: at.KeyArrayLike) -> "Pi0":
+        if self.enable_dual_teacher:
+            if not self.enable_spatial_query:
+                raise ValueError("Dual teachers require spatial queries")
+            from openpi.models.pi0_dual_teacher import Pi0DualTeacher
+            return Pi0DualTeacher(self, rngs=nnx.Rngs(rng), num_queries=self.spatial_num_queries, teacher_dim=self.teacher_latent_dim)
+        if self.enable_spatial_query:
+            from openpi.models.pi0_spatial import Pi0Spatial
+
+            return Pi0Spatial(
+                self,
+                rngs=nnx.Rngs(rng),
+                num_queries=self.spatial_num_queries,
+                teacher_dim=self.teacher_latent_dim,
+            )
         from openpi.models.pi0 import Pi0
 
         return Pi0(self, rngs=nnx.Rngs(rng))
@@ -78,6 +98,27 @@ class Pi0Config(_model.BaseModelConfig):
 
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
         """Returns the freeze filter based on the model config."""
+        if self.enable_spatial_query:
+            # Keep SigLIP/PaliGemma and the Action Expert's dense weights frozen;
+            # retain Action Expert LoRA and the new query/head parameters.
+            # The dual-stream Gemma stores both VLM and Action Expert weights
+            # under PaliGemma.llm. Freeze the full VLM branch but explicitly
+            # leave only the Expert's suffixed LoRA leaves trainable.
+            action_lora = nnx_utils.PathRegex(
+                ".*(attn_vec_einsum_1|kv_einsum_1|q_einsum_1|mlp_1).*lora.*"
+            )
+            vlm = nnx.All(nnx_utils.PathRegex(".*PaliGemma.*"), nnx.Not(action_lora))
+            action_dense = nnx.All(
+                nnx_utils.PathRegex(".*llm.*_1.*"),
+                nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            )
+            # The outer flow/action projections are part of the pretrained
+            # action head, not LoRA adapters. Keep them fixed so the declared
+            # fine-tuning policy is exactly Action-Expert LoRA + new modules.
+            action_projection = nnx_utils.PathRegex(
+                ".*(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out).*"
+            )
+            return nnx.Any(vlm, action_dense, action_projection)
         filters = []
         has_lora = False
         gemma_params_filter = nnx_utils.PathRegex(".*llm.*")

@@ -9,6 +9,7 @@ from typing import Protocol
 from etils import epath
 import jax
 import orbax.checkpoint as ocp
+from orbax.checkpoint import checkpoint_utils
 import orbax.checkpoint.future as future
 
 from openpi.shared import array_typing as at
@@ -100,12 +101,19 @@ def restore_state(
     with at.disable_typechecking():
         # Split params that can be used for inference into a separate item.
         train_state, params = _split_params(state)
+        params_item = {"params": params}
         restored = checkpoint_manager.restore(
             step,
-            items={
-                "train_state": train_state,
-                "params": {"params": params},
-            },
+            args=ocp.args.Composite(
+                train_state=ocp.args.PyTreeRestore(
+                    item=train_state,
+                    restore_args=checkpoint_utils.construct_restore_args(train_state),
+                ),
+                params=ocp.args.PyTreeRestore(
+                    item=params_item,
+                    restore_args=checkpoint_utils.construct_restore_args(params_item),
+                ),
+            ),
         )
     return _merge_params(restored["train_state"], restored["params"])
 

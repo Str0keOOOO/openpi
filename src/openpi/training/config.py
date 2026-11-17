@@ -25,6 +25,7 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.policies.robocasa_policy as robocasa_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
+import openpi.shared.nnx_utils as _nnx_utils
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
@@ -39,6 +40,14 @@ from robocasa.utils.dataset_registry import DATASET_SOUP_REGISTRY, get_ds_meta
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+
+def _project_path(relative: str) -> str:
+    """Resolve local assets from the reorganized workspace root."""
+    root = pathlib.Path(os.environ.get(
+        "ROBOCASA365_ROOT", str(pathlib.Path(__file__).resolve().parents[5])
+    ))
+    return str(root / relative)
+
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,6 +114,15 @@ class DataConfig:
     # Used for Groot datasets
     data_dirs: Any | None = None
     dataset_weights: list[float] | None = None
+    # Optional episode-level spatial distillation adapter inputs.
+    spatial_teacher_cache_dir: str | None = None
+    dual_teacher_cache: bool = False
+    dense_teacher_cache: bool = False
+    spatial_windows_csv: str | None = None
+    spatial_episode_audit_csv: str | None = None
+    spatial_episode_exclusions_csv: str | None = None
+    spatial_split: Literal['train', 'all'] = 'train'
+    spatial_min_teacher_episode_coverage: float = 0.0
 
 
 class GroupFactory(Protocol):
@@ -597,6 +615,55 @@ class LeRobotRobocasaDataConfig(DataConfigFactory):
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class LeRobotRobocasaSpatialDataConfig(LeRobotRobocasaDataConfig):
+    """Fixed-base Human windows plus frame-aligned 64D teacher cache."""
+    spatial_teacher_cache_dir: str = ''
+    dual_teacher_cache: bool = False
+    dense_teacher_cache: bool = False
+    spatial_windows_csv: str = _project_path('data/training_views/fixed_base_chunk_starts.csv')
+    spatial_episode_audit_csv: str = _project_path('data/training_views/episodes.csv')
+    spatial_episode_exclusions_csv: str = ''
+    spatial_split: Literal['train', 'all'] = 'train'
+    minimum_teacher_episode_coverage: float = 0.95
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        if not self.spatial_teacher_cache_dir:
+            raise ValueError('spatial_teacher_cache_dir is required for spatial training')
+        repack=_transforms.Group(inputs=[_transforms.RepackTransform({
+            'observation/image':'observation/image',
+            'observation/wrist_image':'observation/wrist_image',
+            'observation/right_image':'observation/right_image',
+            'observation/state':'observation/state','actions':'actions','prompt':'prompt',
+            'teacher_latent':'teacher_latent','teacher_valid':'teacher_valid',
+        })])
+        from examples.robocasa_spatial.episode_dataset import SpatialInputs
+        if self.dense_teacher_cache:
+            from examples.robocasa_spatial.dense_teacher_dataset import DenseSpatialInputs
+            SpatialInputs=DenseSpatialInputs
+            mapping={k:k for k in ['observation/image','observation/wrist_image','observation/right_image','observation/state','actions','prompt','scene_flow','scene_pixel_valid','ee_teacher','ee_teacher_valid']}
+            repack=_transforms.Group(inputs=[_transforms.RepackTransform(mapping)])
+        data_transforms=_transforms.Group(
+            inputs=[SpatialInputs(model_config.action_dim)],
+            outputs=[robocasa_policy.RobocasaOutputs()],
+        )
+        # Reuse the official assets -> per-dataset meta/stats.json fallback.
+        # Inference can supply the statistics saved with its checkpoint via base_config.
+        base=super().create(assets_dirs,model_config)
+        return dataclasses.replace(base,
+            repack_transforms=repack,data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            spatial_teacher_cache_dir=self.spatial_teacher_cache_dir,
+            dual_teacher_cache=self.dual_teacher_cache,
+            dense_teacher_cache=self.dense_teacher_cache,
+            spatial_windows_csv=self.spatial_windows_csv,
+            spatial_episode_audit_csv=self.spatial_episode_audit_csv,
+            spatial_episode_exclusions_csv=self.spatial_episode_exclusions_csv,
+            spatial_split=self.spatial_split,
+            spatial_min_teacher_episode_coverage=self.minimum_teacher_episode_coverage)
+
+
 @dataclasses.dataclass
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -631,14 +698,15 @@ class TrainConfig:
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
 
     # Base directory for config assets (e.g., norm stats).
-    assets_base_dir: str = "./assets"
+    assets_base_dir: str = _project_path("model/assets")
     # Base directory for checkpoints.
-    checkpoint_base_dir: str = "./checkpoints"
+    checkpoint_base_dir: str = _project_path("model/checkpoints")
 
     # Random seed that will be used by random generators during training.
     seed: int = 42
     # Global batch size.
     batch_size: int = 32
+    gradient_accumulation_steps: int = 1
     # Number of workers to use for the data loader. Increasing this number will speed up data loading but
     # will increase memory and CPU usage.
     num_workers: int = 2
@@ -668,6 +736,11 @@ class TrainConfig:
     # eg. if total device is 4 and fsdp devices is 2; then the model will shard to 2 devices and run
     # data parallel between 2 groups of devices.
     fsdp_devices: int = 1
+
+    # Enables the masked episode-level spatial latent objective in train_step.
+    lambda_spatial: float = 0.0
+    lambda_scene: float = 0.0
+    lambda_ee: float = 0.0
 
     @property
     def assets_dirs(self) -> pathlib.Path:
@@ -1294,6 +1367,102 @@ _CONFIGS = [
         num_workers=4,
     ),
     TrainConfig(
+        name="pi05_robocasa_spatial_query_human4",
+        project_name="robocasa-spatial-distillation",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            max_token_len=200,
+            enable_spatial_query=True,
+            spatial_num_queries=8,
+            teacher_latent_dim=64,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaSpatialDataConfig(
+            data_dirs=[
+                {**entry,
+                 "path": str(pathlib.Path(_project_path('data/training_views/groot')) / entry["task"]),
+                 "filter_key": None}
+                for entry in DATASET_SOUP_REGISTRY["pretrain_human300"]
+                if entry["task"] in (
+                    "PickPlaceSinkToCounter", "OpenDrawer",
+                    "OpenStandMixerHead", "PickPlaceCounterToCabinet",
+                )
+            ],
+            spatial_teacher_cache_dir=_project_path('output/anchor_visual_audit/teacher_cache/frame_level_all_starts'),
+            spatial_episode_exclusions_csv="",
+            spatial_split="train",
+            minimum_teacher_episode_coverage=0.95,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            _project_path('model/pi05_base/params'),
+            missing_regex=".*(lora|spatial_query|geometry_head).*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=2.5e-5,
+            decay_steps=15000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-4),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        lambda_spatial=0.1,
+        num_train_steps=15000,
+        save_interval=500,
+        keep_period=2000,
+        batch_size=32,
+        num_workers=2,
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi05_robocasa_human4_baseline",
+        project_name="robocasa-spatial-distillation",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_dim=32,
+            action_horizon=50,
+            max_token_len=200,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
+        ),
+        data=LeRobotRobocasaDataConfig(
+            data_dirs=[
+                {**entry,
+                 "path": str(pathlib.Path(_project_path('data/training_views/groot')) / entry["task"]),
+                 "filter_key": None}
+                for entry in DATASET_SOUP_REGISTRY["pretrain_human300"]
+                if entry["task"] in (
+                    "PickPlaceSinkToCounter", "OpenDrawer",
+                    "OpenStandMixerHead", "PickPlaceCounterToCabinet",
+                )
+            ],
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            _project_path('model/pi05_base/params'),
+            missing_regex=".*lora.*",
+        ),
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=100,
+            peak_lr=2.5e-5,
+            decay_steps=15000,
+            decay_lr=1e-6,
+        ),
+        optimizer=_optimizer.AdamW(weight_decay=1e-4),
+        freeze_filter=pi0_config.Pi0Config(
+            pi05=True, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        num_train_steps=15000,
+        save_interval=500,
+        keep_period=2000,
+        batch_size=32,
+        num_workers=2,
+        ema_decay=None,
+    ),
+    TrainConfig(
         name="pi05-og_robocasa_pickplacetoastertocounter",
         model=pi0_config.Pi0Config(
             pi05=True,
@@ -1309,6 +1478,63 @@ _CONFIGS = [
         num_workers=4,
     ),
 ]
+
+# Baseline rerun on current Human-only snapshot; all other fields inherited.
+_human418_baseline = next(c for c in _CONFIGS if c.name == "pi05_robocasa_human4_baseline")
+_CONFIGS.append(dataclasses.replace(
+    _human418_baseline, name="pi05_robocasa_human418_baseline",
+    data=dataclasses.replace(_human418_baseline.data, data_dirs=[
+        {**entry, "path": str(pathlib.Path(_project_path('data/training_views/human418_groot')) / entry["task"])}
+        for entry in _human418_baseline.data.data_dirs
+    ]),
+))
+
+# Separate ablations; teacher cache must be generated from the final dataset revision.
+_spatial_base = next(c for c in _CONFIGS if c.name == "pi05_robocasa_spatial_query_human4")
+_dual_model = dataclasses.replace(_spatial_base.model, enable_dual_teacher=True, image_augmentation_enabled=False)
+_dual_data = dataclasses.replace(_spatial_base.data, dual_teacher_cache=True,
+    spatial_teacher_cache_dir=_project_path('output/roma_ee_dual_teacher/cache'),
+    data_dirs=[{**entry, "path": str(pathlib.Path(_project_path('data/household_augmented')) / entry["task"] / "lerobot"), "filter_key": None} for entry in _spatial_base.data.data_dirs])
+_dual_freeze = nnx.Not(_nnx_utils.PathRegex(".*(lora|spatial_query|scene_hidden|scene_head|ee_hidden|ee_head).*"))
+_dual_baseline_model = dataclasses.replace(_spatial_base.model, enable_spatial_query=False, enable_dual_teacher=False, image_augmentation_enabled=False)
+_dual_baseline_data = dataclasses.replace(_human418_baseline.data, data_dirs=_dual_data.data_dirs)
+_CONFIGS.append(dataclasses.replace(_spatial_base, name="pi05_robocasa_roma_ee_baseline", model=_dual_baseline_model,
+    data=_dual_baseline_data, freeze_filter=_dual_freeze,
+    weight_loader=weight_loaders.CheckpointWeightLoader(
+        _project_path('model/pi05_base/params')),
+    lambda_spatial=0., lambda_scene=0., lambda_ee=0.))
+for _suffix, _scene_weight, _ee_weight in (("scene", .05, 0.), ("ee", 0., .01), ("dual", .05, .01)):
+    _CONFIGS.append(dataclasses.replace(_spatial_base, name="pi05_robocasa_roma_ee_"+_suffix,
+        model=_dual_model, data=_dual_data, freeze_filter=_dual_freeze,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            _project_path('model/pi05_base/params'),
+            missing_regex=".*(lora|spatial_query|scene_hidden|scene_head|ee_hidden|ee_head).*"),
+        lambda_spatial=0., lambda_scene=_scene_weight, lambda_ee=_ee_weight))
+
+# Final paired-data experiments: same native Human baseline preprocessing and freeze policy.
+for _name, _view, _steps in (("pi05_household_augmented_lora_30k", "final_augmented_groot", 30000),
+                             ("pi05_household_anchor_lora_6k", "final_anchor_groot", 6000)):
+    _data = dataclasses.replace(_human418_baseline.data, data_dirs=[
+        {**e, "path": str(pathlib.Path(_project_path('data/training_views')) / _view / e["task"]), "filter_key": None}
+        for e in _human418_baseline.data.data_dirs])
+    _CONFIGS.append(dataclasses.replace(_human418_baseline, name=_name, data=_data,
+        num_train_steps=_steps, batch_size=32, num_workers=2,
+        lr_schedule=dataclasses.replace(_human418_baseline.lr_schedule, decay_steps=_steps),
+        save_interval=2000, keep_period=None, ema_decay=None,
+        gradient_accumulation_steps=8 if _view=="final_anchor_groot" else 1))
+
+_final_aug_base=next(c for c in _CONFIGS if c.name=="pi05_household_augmented_lora_30k")
+_final_dense_data=dataclasses.replace(_dual_data,dense_teacher_cache=True,
+    data_dirs=_final_aug_base.data.data_dirs,
+    spatial_teacher_cache_dir=_project_path('data/teacher_dense/cache'),
+    minimum_teacher_episode_coverage=0.)
+_CONFIGS.append(dataclasses.replace(_final_aug_base,name="pi05_household_dual_teacher_30k",
+    model=dataclasses.replace(_dual_model,image_augmentation_enabled=True),data=_final_dense_data,
+    freeze_filter=_final_aug_base.freeze_filter,
+    weight_loader=weight_loaders.CheckpointWeightLoader(
+        _project_path('model/pi05_base/params'),
+        missing_regex=".*(lora|spatial_query|scene_hidden|scene_head|ee_hidden|ee_head).*"),
+    lambda_spatial=0.,lambda_scene=.1,lambda_ee=.1))
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

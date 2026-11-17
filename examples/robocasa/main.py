@@ -1,4 +1,5 @@
 import collections
+import csv
 import dataclasses
 import logging
 import math
@@ -12,6 +13,7 @@ import tqdm
 import tyro
 import json
 import os
+import time
 from copy import deepcopy
 from robocasa.utils.dataset_registry_utils import get_task_horizon
 
@@ -37,7 +39,7 @@ class Args:
 
     split: str = "pretrain"
     num_trials: int = 50  # Number of rollouts per task
-    task_set: list = None
+    task_set: list[str] = dataclasses.field(default_factory=lambda: ["atomic_seen"])
 
     #################################################################################################################
     # Utils
@@ -59,7 +61,11 @@ def eval_main(args: Args) -> None:
     host = args.host
     port = args.port
 
-    all_env_names = TASK_SET_REGISTRY[args.task_soup]
+    # The documented CLI accepts one or more task-set names.
+    all_env_names = list(dict.fromkeys(
+        env_name for task_set in args.task_set
+        for env_name in TASK_SET_REGISTRY[task_set]
+    ))
 
     for env_name in all_env_names:
         eval_env(
@@ -96,14 +102,18 @@ def eval_env(env_name, split, log_dir, num_trials, resize_size, replan_steps, ho
     # Start evaluation
     total_episodes, total_successes = 0, 0
     # Get task
+    scene_start = time.perf_counter()
     env = gym.make(f"robocasa/{env_name}", split=split, seed=seed)
+    logging.info("[%s] Scene creation wall time: %.3f seconds", env_name, time.perf_counter() - scene_start)
 
     # Start episodes
     task_episodes, task_successes = 0, 0
     for episode_idx in tqdm.tqdm(range(num_trials)):
+        episode_start = time.perf_counter()
 
         # Reset environment
         obs, info = env.reset()
+        reset_finished = time.perf_counter()
         task_lang = obs["annotation.human.task_description"]
         action_plan = collections.deque()
 
@@ -177,6 +187,7 @@ def eval_env(env_name, split, log_dir, num_trials, resize_size, replan_steps, ho
                 break
             t += 1
 
+        rollout_finished = time.perf_counter()
         task_episodes += 1
         total_episodes += 1
 
@@ -187,6 +198,23 @@ def eval_env(env_name, split, log_dir, num_trials, resize_size, replan_steps, ho
             [np.asarray(x) for x in replay_images],
             fps=20,
         )
+        episode_finished = time.perf_counter()
+        timing = dict(
+            task=env_name, trial_index=episode_idx, environment_seed=seed,
+            success=bool(done), horizon=horizon, steps=min(t + 1, horizon),
+            reset_seconds=reset_finished - episode_start,
+            rollout_wall_seconds=rollout_finished - reset_finished,
+            video_write_seconds=episode_finished - rollout_finished,
+            total_wall_seconds=episode_finished - episode_start,
+        )
+        timing_path = pathlib.Path(log_path) / "timings.csv"
+        write_header = not timing_path.exists()
+        with timing_path.open("a", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(timing))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(timing)
+        logging.info("[%s] Trial %d timing: %s", env_name, episode_idx, timing)
 
         # Log current results
         logging.info(f"Success: {done}")

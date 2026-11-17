@@ -117,45 +117,120 @@ def init_train_state(
     state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
 
     if resume:
+        # Restore onto the current device mesh, including when changing GPU count.
+        # Without explicit shardings Orbax reuses the checkpoint's saved devices.
+        train_state_shape = jax.tree.map(
+            lambda value, target: jax.ShapeDtypeStruct(
+                value.shape, value.dtype, sharding=target, weak_type=value.weak_type
+            ) if isinstance(value, jax.ShapeDtypeStruct) else value,
+            train_state_shape,
+            state_sharding,
+        )
         return train_state_shape, state_sharding
 
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    # Transfer pretrained parameters with FSDP too. Replicating the full FP32
+    # checkpoint first can exceed a device's memory before sharded init begins.
+    partial_sharding = sharding.fsdp_sharding(partial_params, mesh)
 
     # Initialize the train state and mix in the partial params.
     train_state = jax.jit(
         init,
         donate_argnums=(1,),  # donate the partial params buffer.
-        in_shardings=replicated_sharding,
+        in_shardings=(replicated_sharding, partial_sharding),
         out_shardings=state_sharding,
     )(init_rng, partial_params)
 
     return train_state, state_sharding
 
 
-@at.typecheck
 def train_step(
     config: _config.TrainConfig,
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
-    batch: tuple[_model.Observation, _model.Actions],
+    batch,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
 
-    @at.typecheck
-    def loss_fn(
-        model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
-    ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
-
     train_rng = jax.random.fold_in(rng, state.step)
-    observation, actions = batch
+    spatial_metrics = None
+    dual_metrics = None
+    if config.gradient_accumulation_steps > 1 and len(batch) == 6:
+        count = config.gradient_accumulation_steps
+        if config.batch_size % count:
+            raise ValueError("Global batch must divide accumulation count")
+        # Pool masks AFTER native RGB augmentation, before microbatching. A
+        # plain mean of masked microbatch losses would overweight sparse masks.
+        # Weight their numerators by the actual full-batch valid counts instead.
+        prepared = model.prepare_dual_inputs(train_rng, *batch, train=True)
+        scene_count = jnp.sum(prepared[5])
+        ee_count = jnp.sum(prepared[7])
+        micro = jax.tree.map(lambda x: x.reshape((count, x.shape[0] // count) + x.shape[1:]), prepared)
+        zero = jax.tree.map(jnp.zeros_like, state.params.filter(config.trainable_filter))
 
-    # Filter out frozen params.
-    diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+        def accumulate_dual(total, inputs):
+            inner = nnx.merge(state.model_def, state.params)
+            inner.train()
+
+            def micro_loss(m):
+                a, sc, el, scn, en, _, _ = m.compute_prepared_dual_losses(*inputs)
+                weighted = (a / count, sc * scn / jnp.maximum(scene_count, 1),
+                            el * en / jnp.maximum(ee_count, 1))
+                return weighted[0] + config.lambda_scene * weighted[1] + config.lambda_ee * weighted[2], weighted
+
+            (value, metrics), gradient = nnx.value_and_grad(
+                micro_loss, argnums=nnx.DiffState(0, config.trainable_filter), has_aux=True
+            )(inner)
+            return jax.tree.map(lambda a, b: a + b, total, gradient), (value, metrics)
+
+        grads, (values, components) = jax.lax.scan(accumulate_dual, zero, micro)
+        loss = jnp.sum(values)
+        dual_metrics = (*jax.tree.map(jnp.sum, components), scene_count, ee_count)
+    elif config.gradient_accumulation_steps > 1:
+        if len(batch)!=2:raise ValueError("Accumulation currently supports the native Action-only route")
+        count=config.gradient_accumulation_steps
+        if config.batch_size%count:raise ValueError("Global batch must divide accumulation count")
+        micro=jax.tree.map(lambda x:x.reshape((count,x.shape[0]//count)+x.shape[1:]),batch)
+        zero=jax.tree.map(jnp.zeros_like,state.params.filter(config.trainable_filter))
+        keys=jax.random.split(train_rng,count)
+        def accumulate(total,inputs):
+            (ob,act),key=inputs
+            inner=nnx.merge(state.model_def,state.params);inner.train()
+            def micro_loss(m,r):return jnp.mean(m.compute_loss(r,ob,act,train=True))
+            value,gradient=nnx.value_and_grad(micro_loss,argnums=nnx.DiffState(0,config.trainable_filter))(inner,key)
+            return jax.tree.map(lambda a,b:a+b,total,gradient),value
+        summed,values=jax.lax.scan(accumulate,zero,(micro,keys))
+        grads=jax.tree.map(lambda x:x/count,summed);loss=jnp.mean(values)
+    elif len(batch) == 6:
+        observation, actions, scene, scene_valid, ee, ee_valid = batch
+        if not hasattr(model, "compute_dual_losses"):
+            raise TypeError("Dual teacher batch requires Pi0DualTeacher")
+        def loss_fn(model, rng):
+            a, sc, el, scn, en, _, _ = model.compute_dual_losses(rng, observation, actions, scene, scene_valid, ee, ee_valid, train=True)
+            return a + config.lambda_scene*sc + config.lambda_ee*el, (a, sc, el, scn, en)
+        diff_state = nnx.DiffState(0, config.trainable_filter)
+        (loss, dual_metrics), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(model, train_rng)
+    elif len(batch) == 4:
+        observation, actions, teacher, teacher_valid = batch
+        if not hasattr(model, 'compute_spatial_losses'):
+            raise TypeError('spatial teacher batch supplied to a non-spatial model')
+        def loss_fn(model, rng):
+            action_loss, spatial_loss, per_camera, _, valid_count = model.compute_spatial_losses(
+                rng, observation, actions, teacher, teacher_valid, train=True
+            )
+            total=action_loss+config.lambda_spatial*spatial_loss
+            return total,(action_loss,spatial_loss,per_camera,valid_count)
+        diff_state=nnx.DiffState(0,config.trainable_filter)
+        (loss,spatial_metrics),grads=nnx.value_and_grad(loss_fn,argnums=diff_state,has_aux=True)(model,train_rng)
+    else:
+        observation, actions = batch
+        def loss_fn(model, rng):
+            chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+            return jnp.mean(chunked_loss)
+        diff_state=nnx.DiffState(0,config.trainable_filter)
+        loss,grads=nnx.value_and_grad(loss_fn,argnums=diff_state)(model,train_rng)
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -188,6 +263,15 @@ def train_step(
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
     }
+    if dual_metrics is not None:
+        a, sc, el, scn, en = dual_metrics
+        info.update({"action_loss":a, "scene_loss":sc, "ee_loss":el, "scene_valid_count":scn, "ee_valid_count":en})
+    if spatial_metrics is not None:
+        action_loss,spatial_loss,per_camera,valid_count=spatial_metrics
+        info.update({'action_loss':action_loss,'spatial_loss':spatial_loss,
+                     'spatial_agentview_left_loss':per_camera[0],
+                     'spatial_agentview_right_loss':per_camera[1],
+                     'spatial_valid_count':valid_count})
     return new_state, info
 
 

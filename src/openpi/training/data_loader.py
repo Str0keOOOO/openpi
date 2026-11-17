@@ -137,6 +137,21 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
+    if getattr(data_config, 'spatial_teacher_cache_dir', None):
+        if data_config.dense_teacher_cache:
+            from examples.robocasa_spatial.dense_teacher_dataset import OfficialMixtureWithDenseTeacher as TeacherDataset
+        elif data_config.dual_teacher_cache:
+            from examples.robocasa_spatial.dual_teacher_dataset import OfficialMixtureWithDualTeacher as TeacherDataset
+        else:
+            from examples.robocasa_spatial.official_mixture import OfficialMixtureWithTeacher as TeacherDataset
+
+        return TeacherDataset(
+            dataset_meta_list=data_config.data_dirs,
+            action_horizon=action_horizon,
+            teacher_root=data_config.spatial_teacher_cache_dir,
+            dataset_weights=data_config.dataset_weights,
+        )
+
     # 1) groot datasets
     if getattr(data_config, "data_dirs", None):
         data_dirs = data_config.data_dirs
@@ -557,4 +572,12 @@ class DataLoaderImpl(DataLoader):
 
     def __iter__(self):
         for batch in self._data_loader:
-            yield _model.Observation.from_dict(batch), batch["actions"]
+            observation, actions = _model.Observation.from_dict(batch), batch["actions"]
+            if "scene_flow" in batch:
+                yield observation,actions,batch["scene_flow"],batch["scene_pixel_valid"],batch["ee_teacher"],batch["ee_teacher_valid"]
+            elif "teacher_latent" in batch and batch["teacher_latent"].shape[-1] == 70:
+                yield observation, actions, batch["teacher_latent"][..., :64], batch["teacher_valid"][..., :64], batch["teacher_latent"][..., 64:], batch["teacher_valid"][..., 64:]
+            elif "teacher_latent" in batch:
+                yield observation, actions, batch['teacher_latent'], batch['teacher_valid']
+            else:
+                yield observation, actions

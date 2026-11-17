@@ -1,0 +1,96 @@
+{
+  "version": 2,
+  "protocol": "grouped_same_level_v2",
+  "tasks": [
+    "PickPlaceSinkToCounter",
+    "OpenDrawer",
+    "OpenStandMixerHead",
+    "PickPlaceCounterToCabinet"
+  ],
+  "seed": 20261112,
+  "training_dataset": "/data5/xuchenfei/robocasa365_household",
+  "scenes_per_task": 5,
+  "samples_per_scene_level": 8,
+  "baseline_per_scene": 1,
+  "magnitude_subbins": 5,
+  "reference": "saved_actual_test_anchor_first_frame",
+  "names": [
+    "X",
+    "Y",
+    "Yaw",
+    "Height",
+    "J1",
+    "J2",
+    "J3",
+    "J4",
+    "J5",
+    "J6",
+    "J7"
+  ],
+  "units": [
+    "m",
+    "m",
+    "deg",
+    "m",
+    "deg",
+    "deg",
+    "deg",
+    "deg",
+    "deg",
+    "deg",
+    "deg"
+  ],
+  "training_limits": [
+    0.1,
+    0.1,
+    10,
+    0.1,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10,
+    10
+  ],
+  "level_multipliers": [
+    [
+      0,
+      0.5
+    ],
+    [
+      0.5,
+      1
+    ],
+    [
+      1,
+      1.5
+    ]
+  ],
+  "tolerances": [
+    0.001,
+    0.001,
+    0.1,
+    0.001,
+    0.1,
+    0.1,
+    0.1,
+    0.1,
+    0.1,
+    0.1,
+    0.1
+  ],
+  "max_sampling_attempts_per_slot": 50,
+  "max_anchor_attempts_per_scene": 12,
+  "image_size": 256,
+  "object_split": "pretrain",
+  "scene_isolation": "layout_style_combination_absent_from_all_418_training_humans",
+  "anchor_pose": "official_task_reset_anchor_xy_yaw_with_official_nominal_arm_torso_gripper_and_zero_robot_velocity",
+  "inference": {
+    "resize_size": 224,
+    "replan_steps": 5
+  },
+  "models": {},
+  "replacement_sampling": "whole_tier_legal_points",
+  "marginal_balance": "soft_target_over_physically_valid_points"
+}
