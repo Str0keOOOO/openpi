@@ -19,6 +19,9 @@ def test_views_select_categories_and_preserve_normalization_on_rebuild(tmp_path:
     (dataset / "episode_index_map.csv").write_text(
         "task,filtered_episode_index,type\nTask,0,human\nTask,1,anchor\nTask,2,perturb_multi\nTask,3,anchor\n"
     )
+    (dataset / "human_anchor_pairs.csv").write_text(
+        "task,human_episode_index,anchor_episode_index,anchor_generation_method\nTask,0,3,human_copy\n"
+    )
     data_path = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
     video_path = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
     info = {
@@ -36,23 +39,28 @@ def test_views_select_categories_and_preserve_normalization_on_rebuild(tmp_path:
 
     episodes, stats = [], []
     start = 0
-    for episode, size in enumerate([3, 5, 7, 2]):
+    for episode, size in enumerate([3, 5, 7, 3]):
         parquet = source / path_for(data_path, episode)
         parquet.parent.mkdir(parents=True, exist_ok=True)
+        value_id = 0 if episode == 3 else episode
+        vector_type = pa.list_(pa.float64()) if episode == 3 else pa.list_(pa.float64(), 2)
         table = pa.table(
             {
                 "episode_index": [episode] * size,
                 "index": range(start, start + size),
                 "frame_index": range(size),
                 "timestamp": [i / 20 for i in range(size)],
-                "action": pa.array([[episode, i] for i in range(size)], type=pa.list_(pa.float64(), 2)),
+                "action": pa.array([[value_id, i] for i in range(size)], type=vector_type),
+                "observation.state": pa.array([[i, value_id] for i in range(size)], type=vector_type),
             }
         )
         pq.write_table(table, parquet)
         video = source / path_for(video_path, episode)
         video.parent.mkdir(parents=True, exist_ok=True)
         video.write_bytes(b"video")
-        (source / "extras" / f"episode_{episode:06d}").mkdir(parents=True)
+        extras = source / "extras" / f"episode_{episode:06d}"
+        extras.mkdir(parents=True)
+        (extras / "states.npz").write_bytes(b"states")
         episodes.append({"episode_index": episode, "length": size})
         stats.append(
             {
@@ -75,7 +83,7 @@ def test_views_select_categories_and_preserve_normalization_on_rebuild(tmp_path:
     reference.write_bytes(norm)
     for _ in range(2):
         assert build_views(dataset, output) == {"human": 1, "anchor": 2, "all": 4}
-        for view, ids, frames in [("human", [0], 3), ("anchor", [1, 3], 7), ("all", [0, 1, 2, 3], 17)]:
+        for view, ids, frames in [("human", [0], 3), ("anchor", [1, 3], 8), ("all", [0, 1, 2, 3], 18)]:
             task = output / view / "Task"
             info = json.loads((task / "meta/info.json").read_text())
             assert info["total_frames"] == frames
@@ -101,17 +109,26 @@ def test_views_select_categories_and_preserve_normalization_on_rebuild(tmp_path:
                 assert old["episode_index"][0].as_py() == original
                 assert new["episode_index"].to_pylist() == [local] * len(new)
                 assert new["index"].to_pylist() == list(range(start, start + len(new)))
-                assert new.select(["frame_index", "timestamp", "action"]).equals(
-                    old.select(["frame_index", "timestamp", "action"])
-                )
+                values = ["frame_index", "timestamp", "action", "observation.state"]
+                assert new.select(values).to_pydict() == old.select(values).to_pydict()
                 ep_stats = read_jsonl(task / "meta/episodes_stats.jsonl")[local]
                 assert ep_stats["episode_index"] == local
                 assert ep_stats["stats"]["episode_index"] == {"mean": [local], "std": [0], "count": [len(new)]}
                 assert ep_stats["stats"]["index"]["min"] == [start]
-                assert (task / path_for(video_path, local)).resolve() == source / path_for(video_path, original)
-                assert (
-                    task / "extras" / f"episode_{local:06d}"
-                ).resolve() == source / "extras" / f"episode_{original:06d}"
+                video = task / path_for(video_path, local)
+                source_video = source / path_for(video_path, original)
+                extras = task / "extras" / f"episode_{local:06d}"
+                source_extras = source / "extras" / f"episode_{original:06d}"
+                if original == 3:
+                    assert new.schema.equals(pq.read_schema(source / path_for(data_path, 0)), check_metadata=True)
+                    assert not video.samefile(source_video)
+                    assert video.read_bytes() == source_video.read_bytes()
+                    assert not extras.is_symlink()
+                    assert not (extras / "states.npz").samefile(source_extras / "states.npz")
+                    assert (extras / "states.npz").read_bytes() == b"states"
+                else:
+                    assert video.resolve() == source_video
+                    assert extras.resolve() == source_extras
                 start += len(new)
 
 

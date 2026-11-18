@@ -1,12 +1,27 @@
 """Verify teacher provenance against the recorded dataset and actual Anchor."""
 import hashlib
+import json
 from functools import lru_cache
 from pathlib import Path
 
+@lru_cache(maxsize=128)
+def _train_episode_map(root):
+    info = json.loads((root / 'meta/info.json').read_text())
+    if 'train_dataset_path' in info:
+        with (root / 'meta/episodes.jsonl').open() as stream:
+            ids = {row['episode_index']: row['train_episode_index'] for row in map(json.loads, stream)}
+        return (root / info['train_dataset_path']).resolve(), ids
+    return None
+
 @lru_cache(maxsize=8192)
 def source_episode(dataset_path, episode):
-    """Follow the view's extras link to the dataset and episode used by teacher caches."""
-    extras = (Path(dataset_path) / 'extras' / f'episode_{episode:06d}').resolve()
+    """Find the source episode for both copied and linked trajectories."""
+    root = Path(dataset_path)
+    mapping = _train_episode_map(root)
+    if mapping is not None:
+        source, ids = mapping
+        return source, ids[episode]
+    extras = (root / 'extras' / f'episode_{episode:06d}').resolve()
     return extras.parent.parent, int(extras.name.removeprefix('episode_'))
 
 def file_digest(path):

@@ -58,7 +58,9 @@ RoMa、DINOv3、SHARP 的标签生成工具已移出。双教师网络结构和�
 scripts/run.sh prepare
 ```
 
-`human/<任务>` 和 `anchor/<任务>` 可直接用 LeRobot 0.3.3 打开。每个子集只包含选中的轨迹，轨迹和全局帧都从 0 编号。`meta/episodes.jsonl` 中的 `train_episode_index` 对应 `data/train` 中的原编号，可用来查配对表。视频和仿真状态通过相对链接复用，只有编号发生变化的 Parquet 才会重写。`all/<任务>` 直接引用完整数据。
+`human/<任务>` 和 `anchor/<任务>` 可直接用 LeRobot 0.3.3 打开。每个子集只包含选中的轨迹，轨迹和全局帧都从 0 编号。`meta/episodes.jsonl` 中的 `train_episode_index` 对应 `data/train` 中的原编号，可用来查配对表。`all/<任务>` 直接引用完整数据。
+
+Anchor 包含 415 条生成轨迹和 3 条 Human 副本。`data/train/human_anchor_pairs.csv` 用 `anchor_generation_method=human_copy` 标出副本。它们在 Anchor 视图中各自存有独立的 Parquet、三路视频和仿真状态，状态和动作列分别为 16 维和 12 维定长数组。其余轨迹的视频和仿真状态通过相对链接复用。
 
 三个视图的 `meta/stats.json` 沿用同任务的 Human 归一化参数。首次在新目录构建时，用 `--normalization-root` 指向现有 Human 视图。
 

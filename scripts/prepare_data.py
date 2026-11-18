@@ -23,22 +23,34 @@ def write_jsonl(path, rows):
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
 
 
-def link_file(source, dest):
+def place_asset(source, dest, *, copy=False):
     dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.symlink_to(os.path.relpath(source, dest.parent), target_is_directory=source.is_dir())
+    if not copy:
+        dest.symlink_to(os.path.relpath(source, dest.parent), target_is_directory=source.is_dir())
+    elif source.is_dir():
+        shutil.copytree(source, dest)
+    else:
+        shutil.copy2(source, dest)
 
 
 def episode_path(info, template, episode, **kwargs):
     return info[template].format(episode_chunk=episode // info["chunks_size"], episode_index=episode, **kwargs)
 
 
-def write_subset_episode(source, dest, info, video_keys, old_id, new_id, old_start, new_start):
+def write_subset_episode(source, dest, info, video_keys, old_id, new_id, old_start, new_start, paired_human):
     original = source / episode_path(info, "data_path", old_id)
     target = dest / episode_path(info, "data_path", new_id)
-    if old_id == new_id and old_start == new_start:
-        link_file(original, target)
+    independent = paired_human is not None
+    if old_id == new_id and old_start == new_start and not independent:
+        place_asset(original, target)
     else:
         table = pq.ParquetFile(original).read(use_threads=False)
+        if independent and any(
+            not pa.types.is_fixed_size_list(table.schema.field(name).type) for name in ("observation.state", "action")
+        ):
+            # Older human_copy exports used pandas variable-length lists.
+            reference = source / episode_path(info, "data_path", paired_human)
+            table = table.cast(pq.read_schema(reference))
         indices = {
             "episode_index": np.full(table.num_rows, new_id, dtype=np.int64),
             "index": np.arange(new_start, new_start + table.num_rows, dtype=np.int64),
@@ -52,10 +64,10 @@ def write_subset_episode(source, dest, info, video_keys, old_id, new_id, old_sta
     for key in video_keys:
         original = source / episode_path(info, "video_path", old_id, video_key=key)
         target = dest / episode_path(info, "video_path", new_id, video_key=key)
-        link_file(original, target)
+        place_asset(original, target, copy=independent)
     extras = source / "extras" / f"episode_{old_id:06d}"
     if extras.is_dir():
-        link_file(extras, dest / "extras" / f"episode_{new_id:06d}")
+        place_asset(extras, dest / "extras" / f"episode_{new_id:06d}", copy=independent)
 
 
 def shift_index_stats(row, new_id, frame_shift):
@@ -70,7 +82,7 @@ def shift_index_stats(row, new_id, frame_shift):
     return {**row, "episode_index": new_id, "stats": stats}
 
 
-def write_view(source, dest, info, episodes, statistics, starts, normalization, *, subset):
+def write_view(source, dest, info, episodes, statistics, starts, normalization, *, subset, human_copies):
     meta = dest / "meta"
     meta.mkdir(parents=True)
     for name in ("modality.json", "embodiment.json", "tasks.jsonl"):
@@ -79,18 +91,20 @@ def write_view(source, dest, info, episodes, statistics, starts, normalization, 
     if subset:
         extras_meta = source / "extras/dataset_meta.json"
         if extras_meta.is_file():
-            link_file(extras_meta, dest / "extras/dataset_meta.json")
+            place_asset(extras_meta, dest / "extras/dataset_meta.json", copy=bool(human_copies))
     else:
         for name in ("data", "videos", "extras"):
             if (source / name).is_dir():
-                link_file(source / name, dest / name)
+                place_asset(source / name, dest / name)
 
     rows, stats = [], []
     start = 0
     for new_id, ep in enumerate(episodes):
         old_id = ep["episode_index"]
         if subset:
-            write_subset_episode(source, dest, info, video_keys, old_id, new_id, starts[old_id], start)
+            write_subset_episode(
+                source, dest, info, video_keys, old_id, new_id, starts[old_id], start, human_copies.get(old_id)
+            )
             rows.append({**ep, "episode_index": new_id, "train_episode_index": old_id})
             stats.append(shift_index_stats(statistics[old_id], new_id, start - starts[old_id]))
         else:
@@ -106,6 +120,8 @@ def write_view(source, dest, info, episodes, statistics, starts, normalization, 
         total_chunks=(count + info["chunks_size"] - 1) // info["chunks_size"],
         splits={"train": f"0:{count}"},
     )
+    if subset:
+        view_info["train_dataset_path"] = os.path.relpath(source, dest)
     (meta / "info.json").write_text(json.dumps(view_info, indent=2) + "\n")
     (meta / "stats.json").write_bytes(normalization)
     write_jsonl(meta / "episodes.jsonl", rows)
@@ -116,6 +132,15 @@ def build_views(dataset, output, normalization_root=None):
     normalization_root = normalization_root or output / "human"
     with (dataset / "episode_index_map.csv").open() as stream:
         categories = {(row["task"], int(row["filtered_episode_index"])): row["type"] for row in csv.DictReader(stream)}
+    human_copies = {}
+    pairs = dataset / "human_anchor_pairs.csv"
+    if pairs.is_file():
+        with pairs.open() as stream:
+            for row in csv.DictReader(stream):
+                if row["anchor_generation_method"] == "human_copy":
+                    human_copies.setdefault(row["task"], {})[int(row["anchor_episode_index"])] = int(
+                        row["human_episode_index"]
+                    )
     sources = sorted(p for p in dataset.iterdir() if (p / "lerobot/meta/info.json").is_file())
     counts = {"human": 0, "anchor": 0, "all": 0}
     output.mkdir(parents=True, exist_ok=True)
@@ -146,6 +171,7 @@ def build_views(dataset, output, normalization_root=None):
                     starts,
                     normalization,
                     subset=view != "all",
+                    human_copies=human_copies.get(task.name, {}) if view == "anchor" else {},
                 )
                 counts[view] += len(selected)
 
