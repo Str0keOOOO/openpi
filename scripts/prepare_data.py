@@ -1,4 +1,4 @@
-"""Build Human, Anchor and full-data views without copying trajectories."""
+"""Build LeRobot views with local episode indices and shared video files."""
 
 import argparse
 import csv
@@ -6,6 +6,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+from tempfile import TemporaryDirectory
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from openpi.shared.paths import workspace_path
 
@@ -18,46 +23,147 @@ def write_jsonl(path, rows):
     path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
 
 
+def link_file(source, dest):
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.symlink_to(os.path.relpath(source, dest.parent), target_is_directory=source.is_dir())
+
+
+def episode_path(info, template, episode, **kwargs):
+    return info[template].format(episode_chunk=episode // info["chunks_size"], episode_index=episode, **kwargs)
+
+
+def write_subset_episode(source, dest, info, video_keys, old_id, new_id, old_start, new_start):
+    original = source / episode_path(info, "data_path", old_id)
+    target = dest / episode_path(info, "data_path", new_id)
+    if old_id == new_id and old_start == new_start:
+        link_file(original, target)
+    else:
+        table = pq.ParquetFile(original).read(use_threads=False)
+        indices = {
+            "episode_index": np.full(table.num_rows, new_id, dtype=np.int64),
+            "index": np.arange(new_start, new_start + table.num_rows, dtype=np.int64),
+        }
+        for name, values in indices.items():
+            field = table.schema.field(name)
+            table = table.set_column(table.schema.get_field_index(name), field, pa.array(values, type=field.type))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, target, compression="zstd")
+
+    for key in video_keys:
+        original = source / episode_path(info, "video_path", old_id, video_key=key)
+        target = dest / episode_path(info, "video_path", new_id, video_key=key)
+        link_file(original, target)
+    extras = source / "extras" / f"episode_{old_id:06d}"
+    if extras.is_dir():
+        link_file(extras, dest / "extras" / f"episode_{new_id:06d}")
+
+
+def shift_index_stats(row, new_id, frame_shift):
+    stats = row["stats"].copy()
+    for name, shift in (("episode_index", new_id - row["episode_index"]), ("index", frame_shift)):
+        if shift and name in stats:
+            # A translation shifts location statistics but leaves std and count intact.
+            stats[name] = {
+                key: [v + shift for v in values] if key in {"min", "max", "mean"} or key.startswith("q") else values
+                for key, values in stats[name].items()
+            }
+    return {**row, "episode_index": new_id, "stats": stats}
+
+
+def write_view(source, dest, info, episodes, statistics, starts, normalization, *, subset):
+    meta = dest / "meta"
+    meta.mkdir(parents=True)
+    for name in ("modality.json", "embodiment.json", "tasks.jsonl"):
+        shutil.copy2(source / "meta" / name, meta / name)
+    video_keys = [key for key, feature in info["features"].items() if feature.get("dtype") == "video"]
+    if subset:
+        extras_meta = source / "extras/dataset_meta.json"
+        if extras_meta.is_file():
+            link_file(extras_meta, dest / "extras/dataset_meta.json")
+    else:
+        for name in ("data", "videos", "extras"):
+            if (source / name).is_dir():
+                link_file(source / name, dest / name)
+
+    rows, stats = [], []
+    start = 0
+    for new_id, ep in enumerate(episodes):
+        old_id = ep["episode_index"]
+        if subset:
+            write_subset_episode(source, dest, info, video_keys, old_id, new_id, starts[old_id], start)
+            rows.append({**ep, "episode_index": new_id, "train_episode_index": old_id})
+            stats.append(shift_index_stats(statistics[old_id], new_id, start - starts[old_id]))
+        else:
+            rows.append(ep)
+            stats.append(statistics[old_id])
+        start += ep["length"]
+    count = len(rows)
+    view_info = dict(
+        info,
+        total_episodes=count,
+        total_frames=start,
+        total_videos=len(video_keys) * count,
+        total_chunks=(count + info["chunks_size"] - 1) // info["chunks_size"],
+        splits={"train": f"0:{count}"},
+    )
+    (meta / "info.json").write_text(json.dumps(view_info, indent=2) + "\n")
+    (meta / "stats.json").write_bytes(normalization)
+    write_jsonl(meta / "episodes.jsonl", rows)
+    write_jsonl(meta / "episodes_stats.jsonl", stats)
+
+
 def build_views(dataset, output, normalization_root=None):
     normalization_root = normalization_root or output / "human"
     with (dataset / "episode_index_map.csv").open() as stream:
         categories = {(row["task"], int(row["filtered_episode_index"])): row["type"] for row in csv.DictReader(stream)}
     sources = sorted(p for p in dataset.iterdir() if (p / "lerobot/meta/info.json").is_file())
-    # Read before writing so existing Human normalization is preserved exactly.
-    normalization = {p.name: (normalization_root / p.name / "meta/stats.json").read_bytes() for p in sources}
     counts = {"human": 0, "anchor": 0, "all": 0}
-    for task in sources:
-        source = task / "lerobot"
-        episodes = read_jsonl(source / "meta/episodes.jsonl")
-        statistics = read_jsonl(source / "meta/episodes_stats.jsonl")
-        for view in counts:
-            chosen = [ep for ep in episodes if view == "all" or categories[task.name, ep["episode_index"]] == view]
-            ids = {ep["episode_index"] for ep in chosen}
-            dest = output / view / task.name
-            meta = dest / "meta"
-            meta.mkdir(parents=True, exist_ok=True)
-            for name in ["data", "videos", "extras"]:
-                link = dest / name
-                if link.is_symlink():
-                    link.unlink()
-                elif link.exists():
-                    raise FileExistsError(f"{link} contains physical data; expected a link")
-                link.symlink_to(os.path.relpath(source / name, dest), target_is_directory=True)
-            for name in ["modality.json", "tasks.jsonl", "embodiment.json"]:
-                shutil.copy2(source / "meta" / name, meta / name)
-            write_jsonl(meta / "episodes.jsonl", chosen)
-            write_jsonl(meta / "episodes_stats.jsonl", [row for row in statistics if row["episode_index"] in ids])
+    output.mkdir(parents=True, exist_ok=True)
+    # Build beside the live views so relative links work in both locations.
+    with TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as temporary:
+        staged = Path(temporary)
+        for task in sources:
+            source = task / "lerobot"
             info = json.loads((source / "meta/info.json").read_text())
-            cameras = sum(feature.get("dtype") == "video" for feature in info["features"].values())
-            info.update(
-                total_episodes=len(chosen),
-                total_frames=sum(ep["length"] for ep in chosen),
-                total_videos=cameras * len(chosen),
-                splits={"train": f"0:{len(chosen)}"},
-            )
-            (meta / "info.json").write_text(json.dumps(info, indent=2) + "\n")
-            (meta / "stats.json").write_bytes(normalization[task.name])
-            counts[view] += len(chosen)
+            episodes = sorted(read_jsonl(source / "meta/episodes.jsonl"), key=lambda ep: ep["episode_index"])
+            statistics = {ep["episode_index"]: ep for ep in read_jsonl(source / "meta/episodes_stats.jsonl")}
+            normalization = (normalization_root / task.name / "meta/stats.json").read_bytes()
+            starts = {}
+            start = 0
+            for ep in episodes:
+                starts[ep["episode_index"]] = start
+                start += ep["length"]
+            for view in counts:
+                selected = [
+                    ep for ep in episodes if view == "all" or categories[task.name, ep["episode_index"]] == view
+                ]
+                write_view(
+                    source,
+                    staged / view / task.name,
+                    info,
+                    selected,
+                    statistics,
+                    starts,
+                    normalization,
+                    subset=view != "all",
+                )
+                counts[view] += len(selected)
+
+        # Publish only the generated tasks; a failed build leaves the live data usable.
+        for view in counts:
+            (output / view).mkdir(exist_ok=True)
+            for task in sources:
+                dest = output / view / task.name
+                old = staged / "previous" / view / task.name
+                if dest.exists():
+                    old.parent.mkdir(parents=True, exist_ok=True)
+                    dest.rename(old)
+                try:
+                    (staged / view / task.name).rename(dest)
+                except OSError:
+                    if old.exists():
+                        old.rename(dest)
+                    raise
     return counts
 
 

@@ -58,7 +58,9 @@ RoMa、DINOv3、SHARP 的标签生成工具已移出。双教师网络结构和�
 scripts/run.sh prepare
 ```
 
-此命令重建三个视图，通过相对软链接复用原始数据，并保留 Human 归一化统计。视图已有的 `human/<task>/meta/stats.json` 是统计来源；首次从另一份数据构建时可用 `--normalization-root` 指定对应目录。
+`human/<任务>` 和 `anchor/<任务>` 可直接用 LeRobot 0.3.3 打开。每个子集只包含选中的轨迹，轨迹和全局帧都从 0 编号。`meta/episodes.jsonl` 中的 `train_episode_index` 对应 `data/train` 中的原编号，可用来查配对表。视频和仿真状态通过相对链接复用，只有编号发生变化的 Parquet 才会重写。`all/<任务>` 直接引用完整数据。
+
+三个视图的 `meta/stats.json` 沿用同任务的 Human 归一化参数。首次在新目录构建时，用 `--normalization-root` 指向现有 Human 视图。
 
 ## 训练
 

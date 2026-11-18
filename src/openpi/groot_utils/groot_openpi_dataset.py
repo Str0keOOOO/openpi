@@ -191,6 +191,28 @@ class GrootOpenpiMultiDataset(LeRobotMixtureDataset):
             metadata_config=metadata_config,
         )
 
+    @staticmethod
+    def merge_metadata(metadatas, dataset_sampling_weights, percentile_mixing_method):
+        # The upstream mixture uses raw second moments, which lose precision on constant channels.
+        merged = metadatas[0].model_copy(deep=True)
+        if any(m.embodiment_tag != merged.embodiment_tag or m.modalities != merged.modalities for m in metadatas):
+            raise ValueError("Cannot merge different embodiments or modality configurations")
+        for group in ("state", "action"):
+            for name, result in getattr(merged.statistics, group).items():
+                stats = [getattr(m.statistics, group)[name] for m in metadatas]
+                result.mean, result.std = _pooled_mean_std(stats, dataset_sampling_weights)
+                result.min = np.min([s.min for s in stats], axis=0)
+                result.max = np.max([s.max for s in stats], axis=0)
+                if percentile_mixing_method == "weighted_average":
+                    result.q01 = np.average([s.q01 for s in stats], axis=0, weights=dataset_sampling_weights)
+                    result.q99 = np.average([s.q99 for s in stats], axis=0, weights=dataset_sampling_weights)
+                elif percentile_mixing_method == "min_max":
+                    result.q01 = np.min([s.q01 for s in stats], axis=0)
+                    result.q99 = np.max([s.q99 for s in stats], axis=0)
+                else:
+                    raise ValueError(f"Invalid percentile mixing method: {percentile_mixing_method}")
+        return merged
+
     def sample_step(self, index: int) -> tuple[LeRobotSingleDataset, int, int]:
         """
         this code effectively ignores the index and samples randomly.
@@ -325,74 +347,26 @@ def _load_norm_stats_from_groot_dataset(ds_meta: dict) -> dict[str, _transforms.
         "actions": actions_stats,
     }
 
+
+def _pooled_mean_std(stats, weights):
+    """Combine within-task and between-task variance around a shared reference mean."""
+    means = np.asarray([s.mean for s in stats], dtype=np.float64)
+    stds = np.asarray([s.std for s in stats], dtype=np.float64)
+    offsets = means - means[0]
+    mean_offset = np.average(offsets, axis=0, weights=weights)
+    variance = np.average(stds**2 + (offsets - mean_offset)**2, axis=0, weights=weights)
+    return means[0] + mean_offset, np.sqrt(np.maximum(variance, 0))
+
+
 def compute_overall_statistics(
-    per_task_stats: list[dict[str, dict[str, list[float] | np.ndarray]]],
+    per_task_stats: list[dict[str, _normalize.NormStats]],
     dataset_sampling_weights: list[float] | np.ndarray,
-) -> dict[str, dict[str, list[float]]]:
-    """
-    Computes overall statistics from per-task statistics using dataset sample weights.
-
-    Args:
-        per_task_stats: List of per-task statistics.
-        Example format of one element in the per-task statistics list:
-            {
-                "state.gripper": {
-                    "min": [...],
-                    "max": [...],
-                    "mean": [...],
-                    "std": [...],
-                    "q01": [...],
-                    "q99": [...],
-                },
-                ...
-            }
-        dataset_sampling_weights: List of sample weights for each task.
-
-    Returns:
-        A dict of overall statistics per modality.
-    """
-    # Normalize the sample weights to sum to 1
-    dataset_sampling_weights = np.array(dataset_sampling_weights)
-    normalized_weights = dataset_sampling_weights / dataset_sampling_weights.sum()
-
-    # Initialize overall statistics dict
-    overall_stats: dict[str, dict[str, list[float]]] = {}
-
-    # Get the list of modality keys
-    modality_keys = per_task_stats[0].keys()
-
-    for modality in modality_keys:
-        # Number of dimensions (assuming consistent across tasks)
-        num_dims = len(per_task_stats[0][modality].mean)
-
-        # Initialize accumulators for means and variances
-        weighted_means = np.zeros(num_dims)
-        weighted_squares = np.zeros(num_dims)
-
-        for task_idx, task_stats in enumerate(per_task_stats):
-            w_i = normalized_weights[task_idx]
-            stats = task_stats[modality]
-            means = np.array(stats.mean)
-            stds = np.array(stats.std)
-
-            # Update weighted sums for mean and variance
-            weighted_means += w_i * means
-            weighted_squares += w_i * (stds**2 + means**2)
-        
-        # Compute overall mean
-        overall_mean = weighted_means.tolist()
-
-        # Compute overall variance and std deviation
-        overall_variance = weighted_squares - weighted_means**2
-        overall_std = np.sqrt(overall_variance).tolist()
-
-        # Store the overall statistics for the modality
-        overall_stats[modality] = _normalize.NormStats(
-            mean=overall_mean,
-            std=overall_std,
-        )
-
-    return overall_stats
+) -> dict[str, _normalize.NormStats]:
+    combined = {}
+    for modality in per_task_stats[0]:
+        mean, std = _pooled_mean_std([task[modality] for task in per_task_stats], dataset_sampling_weights)
+        combined[modality] = _normalize.NormStats(mean=mean, std=std)
+    return combined
 
 
 def _load_norm_stats_from_groot_mixture_dataset(dataset_meta_list) -> dict[str, _transforms.NormStats] | None:

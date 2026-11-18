@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import numpy as np
 from openpi.groot_utils.groot_openpi_dataset import GrootOpenpiMultiDataset
+from openpi.training.teacher.provenance import source_episode, verify_sources
 
 class OfficialMixtureWithDualTeacher(GrootOpenpiMultiDataset):
     def __init__(self, dataset_meta_list, action_horizon, teacher_root, dataset_weights=None):
@@ -18,7 +19,7 @@ class OfficialMixtureWithDualTeacher(GrootOpenpiMultiDataset):
             audit=json.loads(manifest.read_text())
             if audit.get('status')!='complete' or audit.get('cache_version')!='roma_ee_window_v2_current_to_anchor':
                 raise ValueError(f'Dual teacher cache manifest is not complete: {manifest}')
-            if any(Path(meta['path']).resolve()!= (Path(audit['dataset'])/meta['task']/'lerobot').resolve() for meta in dataset_meta_list):
+            if any(source_episode(meta['path'], 0)[0] != (Path(audit['dataset'])/meta['task']/'lerobot').resolve() for meta in dataset_meta_list):
                 raise ValueError('Dual teacher cache manifest points at a different dataset')
         self.tasks={str(Path(m['path']).resolve()):m['task'] for m in dataset_meta_list}
         self.cache={}; self._last_sample=None
@@ -28,7 +29,8 @@ class OfficialMixtureWithDualTeacher(GrootOpenpiMultiDataset):
     def __getitem__(self,index):
         item=super().__getitem__(index)
         dataset,episode,frame=self._last_sample
-        task=self.tasks[str(Path(dataset.dataset_path).resolve())];episode=int(episode);frame=int(frame)
+        task=self.tasks[str(Path(dataset.dataset_path).resolve())];frame=int(frame)
+        source,episode=source_episode(dataset.dataset_path,int(episode))
         key=(task,episode)
         if key not in self.cache:
             path=self.root/task/f'episode_{episode:06d}.npz'
@@ -40,8 +42,7 @@ class OfficialMixtureWithDualTeacher(GrootOpenpiMultiDataset):
                     meta=json.loads(str(z['metadata']))
                     if meta.get('cache_version')!='roma_ee_window_v2_current_to_anchor' or meta.get('task')!=task or int(meta.get('episode',-1))!=episode:
                         raise ValueError(f'Wrong dual teacher provenance: {path}')
-                    from openpi.training.teacher.provenance import verify_sources
-                    verify_sources(meta,task,episode,dataset.dataset_path)
+                    verify_sources(meta,task,episode,source)
                     frames=np.asarray(z['frame_index'],np.int64)
                     scene=np.asarray(z['scene_latent'],np.float32);sm=np.asarray(z['scene_valid'],bool)
                     ee=np.asarray(z['ee_latent'],np.float32);em=np.asarray(z['ee_valid'],bool)

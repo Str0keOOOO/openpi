@@ -4,7 +4,7 @@ from collections import OrderedDict
 import os,json
 import numpy as np
 from openpi.groot_utils.groot_openpi_dataset import GrootOpenpiMultiDataset
-from openpi.training.teacher.provenance import verify_sources
+from openpi.training.teacher.provenance import source_episode, verify_sources
 from openpi.training.teacher.schema import VERSION,ROMA_SETTING,BIDIRECTIONAL,validate_metadata
 from openpi.training.teacher.state_ee import EE_VERSION,load_teacher
 class DenseSpatialInputs:
@@ -29,12 +29,13 @@ class OfficialMixtureWithDenseTeacher(GrootOpenpiMultiDataset):
    if m['teacher_settings'].get('ee_cache_version')!=EE_VERSION:raise ValueError('Training requires EE labels from recorded State')
  def sample_step(self,index):self._last_sample=super().sample_step(index);return self._last_sample
  def __getitem__(self,index):
-  item=super().__getitem__(index);ds,ep,t=self._last_sample;ep=int(ep);t=int(t);task=self.tasks[str(Path(ds.dataset_path).resolve())];key=(task,ep);folder=self.root/task/f'episode_{ep:06d}'
+  item=super().__getitem__(index);ds,ep,t=self._last_sample
+  source,ep=source_episode(ds.dataset_path,int(ep))
+  t=int(t);task=self.tasks[str(Path(ds.dataset_path).resolve())];key=(task,ep);folder=self.root/task/f'episode_{ep:06d}'
   if key not in self.meta:
    m=json.loads((folder/'metadata.json').read_text())
    validate_metadata(m)
-   if (Path(ds.dataset_path)/'data').resolve()!=(Path(m['dataset'])/task/'lerobot'/'data').resolve():raise ValueError('Training view and dense teacher source differ')
-   verify_sources(m,task,ep,Path(m['dataset'])/task/'lerobot')
+   verify_sources(m,task,ep,source)
    self.meta[key]=m
    if len(self.meta)>32:self.meta.popitem(last=False)
   else:self.meta.move_to_end(key)

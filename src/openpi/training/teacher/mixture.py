@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import numpy as np
 from openpi.groot_utils.groot_openpi_dataset import GrootOpenpiMultiDataset
+from openpi.training.teacher.provenance import source_episode
 
 
 class OfficialMixtureWithTeacher(GrootOpenpiMultiDataset):
@@ -26,7 +27,8 @@ class OfficialMixtureWithTeacher(GrootOpenpiMultiDataset):
         item=super().__getitem__(index)
         dataset,episode,frame=self._last_sample
         task=self._task_by_path[str(Path(dataset.dataset_path).resolve())]
-        episode,frame=int(episode),int(frame)
+        _, episode = source_episode(dataset.dataset_path, int(episode))
+        frame = int(frame)
         key=(task,episode)
         if key not in self._teachers:
             path=self.teacher_root/task/f'episode_{episode:06d}.npz'

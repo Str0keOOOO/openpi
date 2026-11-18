@@ -3,6 +3,12 @@ import hashlib
 from functools import lru_cache
 from pathlib import Path
 
+@lru_cache(maxsize=8192)
+def source_episode(dataset_path, episode):
+    """Follow the view's extras link to the dataset and episode used by teacher caches."""
+    extras = (Path(dataset_path) / 'extras' / f'episode_{episode:06d}').resolve()
+    return extras.parent.parent, int(extras.name.removeprefix('episode_'))
+
 def file_digest(path):
  path=Path(path);s=path.stat()
  return _cached_digest(str(path.resolve()),s.st_size,s.st_mtime_ns,s.st_ctime_ns)
